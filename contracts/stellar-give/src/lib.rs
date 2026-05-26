@@ -70,14 +70,16 @@ fn campaign_key(id: u64) -> (Symbol, u64) {
 }
 
 fn read_next_id(env: &Env) -> u64 {
+    // Instance storage is cheaper per access than Persistent and its lifetime
+    // is managed with the contract instance, so no manual TTL extension needed.
     env.storage()
-        .persistent()
+        .instance()
         .get(&next_id_key())
         .unwrap_or(1_u64)
 }
 
 fn write_next_id(env: &Env, next_id: u64) {
-    env.storage().persistent().set(&next_id_key(), &next_id);
+    env.storage().instance().set(&next_id_key(), &next_id);
 }
 
 fn read_campaign(env: &Env, id: u64) -> Result<Campaign, ContractError> {
@@ -93,9 +95,56 @@ fn write_campaign(env: &Env, campaign: &Campaign) {
         .set(&campaign_key(campaign.id), campaign);
 }
 
-/// Sets a temporary-storage lock for the current invocation context.
-/// Returns `ReentrancyDetected` if the lock is already held, preventing
-/// re-entrant state mutations.
+fn top_donors_key(id: u64) -> (Symbol, u64) {
+    (symbol_short!("TDON"), id)
+}
+
+fn read_top_donors(env: &Env, id: u64) -> Vec<(Address, i128)> {
+    env.storage()
+        .persistent()
+        .get(&top_donors_key(id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+fn write_top_donors(env: &Env, id: u64, donors: &Vec<(Address, i128)>) {
+    env.storage()
+        .persistent()
+        .set(&top_donors_key(id), donors);
+}
+
+fn update_top_donors(env: &Env, campaign_id: u64, donor: &Address, amount: i128) {
+    let old = read_top_donors(env, campaign_id);
+    let mut new_donors: Vec<(Address, i128)> = Vec::new(env);
+
+    // Carry over all existing entries except the current donor; accumulate their total.
+    let mut cumulative = amount;
+    for (addr, prev) in old.iter() {
+        if addr == *donor {
+            cumulative = prev.saturating_add(amount);
+        } else {
+            new_donors.push_back((addr, prev));
+        }
+    }
+
+    // Find sorted insertion position (descending). Insertion sort is O(5) — constant cost.
+    let mut pos = new_donors.len();
+    for i in 0..new_donors.len() {
+        if new_donors.get(i).unwrap().1 < cumulative {
+            pos = i;
+            break;
+        }
+    }
+
+    // Only write when donor enters the top-5 window.
+    if pos < 5 {
+        new_donors.insert(pos, (donor.clone(), cumulative));
+        while new_donors.len() > 5 {
+            new_donors.pop_back();
+        }
+        write_top_donors(env, campaign_id, &new_donors);
+    }
+}
+
 fn enter_lock(env: &Env) -> Result<(), ContractError> {
     let key = lock_key();
     if env.storage().temporary().get::<_, bool>(&key).unwrap_or(false) {
@@ -277,6 +326,7 @@ impl StellarGiveContract {
             };
 
             write_campaign(&env, &campaign);
+            update_top_donors(&env, campaign.id, &donor, amount);
             env.events().publish(
                 (symbol_short!("donation"), symbol_short!("received")),
                 (
@@ -363,6 +413,14 @@ impl StellarGiveContract {
         let mut campaign = read_campaign(&env, campaign_id)?;
         campaign.status = derive_status(env.ledger().timestamp(), &campaign);
         Ok(campaign)
+    }
+
+    pub fn get_top_donors(
+        env: Env,
+        campaign_id: u64,
+    ) -> Result<Vec<(Address, i128)>, ContractError> {
+        read_campaign(&env, campaign_id)?;
+        Ok(read_top_donors(&env, campaign_id))
     }
 }
 
@@ -619,8 +677,56 @@ mod tests {
         bens.push_back((beneficiary.clone(), 3_334_u32));
         bens.push_back((beneficiary2.clone(), 3_333_u32));
         bens.push_back((beneficiary3.clone(), 3_333_u32));
+    #[test]
+    fn invalid_shares_not_summing_to_10000_rejected() {
+        let (env, client, creator, beneficiary, _donor, token_client, _) = setup();
+        let beneficiary2 = Address::generate(&env);
+        set_timestamp(&env, 1_000);
 
-        let campaign_id = client.create_campaign(
+        let mut bens = Vec::new(&env);
+        bens.push_back((beneficiary.clone(), 5_000_u32));
+        bens.push_back((beneficiary2.clone(), 4_999_u32));
+
+        let result = client.try_create_campaign(
+            &creator,
+            &bens,
+            &String::from_str(&env, "Bad Shares"),
+            &100_000,
+            &2_000,
+            &token_client.address,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn id_generation_is_sequential_and_collision_free() {
+        let (env, client, creator, beneficiary, _, token_client, _) = setup();
+        env.budget().reset_unlimited();
+        set_timestamp(&env, 1_000);
+
+        let mut bens = Vec::new(&env);
+        bens.push_back((beneficiary.clone(), 10_000_u32));
+
+        for expected_id in 1_u64..=100_u64 {
+            let id = client.create_campaign(
+                &creator,
+                &bens,
+                &String::from_str(&env, "Bench"),
+                &1_000,
+                &2_000,
+                &token_client.address,
+            );
+            assert_eq!(id, expected_id);
+        }
+    }
+
+    #[test]
+    fn empty_beneficiaries_rejected() {
+        let (env, client, creator, _beneficiary, _donor, token_client, _) = setup();
+        set_timestamp(&env, 1_000);
+
+        let bens: Vec<(Address, u32)> = Vec::new(&env);
+        let result = client.try_create_campaign(
             &creator,
             &bens,
             &String::from_str(&env, "Three Way"),
@@ -628,6 +734,8 @@ mod tests {
             &5_000,
             &token_client.address,
         );
+        assert!(result.is_err());
+    }
 
         client.donate(&donor, &campaign_id, &10_000);
 
@@ -687,5 +795,49 @@ mod tests {
             &token_client.address,
         );
         assert!(result.is_err());
+    #[test]
+    fn reentrancy_lock_uses_temporary_storage_and_blocks_reentry() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, StellarGiveContract);
+
+        client.donate(&donor, &campaign_id, &10_000);
+        client.donate(&donor2, &campaign_id, &50_000);
+        assert_eq!(client.get_top_donors(&campaign_id).get(0).unwrap().0, donor2);
+
+        client.donate(&donor, &campaign_id, &60_000); // donor total: 70_000 → now #1
+        let top = client.get_top_donors(&campaign_id);
+        assert_eq!(top.get(0).unwrap().0, donor);
+        assert_eq!(top.get(0).unwrap().1, 70_000);
+        assert_eq!(top.get(1).unwrap().0, donor2);
+    }
+
+    #[test]
+    fn reentrancy_lock_uses_temporary_storage_and_blocks_reentry() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, StellarGiveContract);
+
+        env.as_contract(&contract_id, || {
+            let key = super::lock_key();
+
+            // Lock key must be absent before any entry.
+            assert!(!env.storage().temporary().has(&key));
+            assert!(!env.storage().persistent().has(&key));
+
+            // First entry succeeds; key appears in temporary storage only.
+            super::enter_lock(&env).unwrap();
+            assert!(env.storage().temporary().has(&key));
+            assert!(!env.storage().persistent().has(&key));
+
+            // Re-entry from the same execution context is rejected.
+            assert_eq!(super::enter_lock(&env), Err(ContractError::ReentrancyDetected));
+
+            // Releasing the lock removes the key from temporary storage.
+            super::exit_lock(&env);
+            assert!(!env.storage().temporary().has(&key));
+
+            // A fresh entry succeeds after release.
+            super::enter_lock(&env).unwrap();
+            super::exit_lock(&env);
+        });
     }
 }
