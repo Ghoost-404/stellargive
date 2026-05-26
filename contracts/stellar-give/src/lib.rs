@@ -680,4 +680,34 @@ mod tests {
         );
         assert!(result.is_err());
     }
+
+    #[test]
+    fn reentrancy_lock_uses_temporary_storage_and_blocks_reentry() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, StellarGiveContract);
+
+        env.as_contract(&contract_id, || {
+            let key = super::lock_key();
+
+            // Lock key must be absent before any entry.
+            assert!(!env.storage().temporary().has(&key));
+            assert!(!env.storage().persistent().has(&key));
+
+            // First entry succeeds; key appears in temporary storage only.
+            super::enter_lock(&env).unwrap();
+            assert!(env.storage().temporary().has(&key));
+            assert!(!env.storage().persistent().has(&key));
+
+            // Re-entry from the same execution context is rejected.
+            assert_eq!(super::enter_lock(&env), Err(ContractError::ReentrancyDetected));
+
+            // Releasing the lock removes the key from temporary storage.
+            super::exit_lock(&env);
+            assert!(!env.storage().temporary().has(&key));
+
+            // A fresh entry succeeds after release.
+            super::enter_lock(&env).unwrap();
+            super::exit_lock(&env);
+        });
+    }
 }
