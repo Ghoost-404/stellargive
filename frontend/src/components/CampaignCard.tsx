@@ -8,6 +8,7 @@ import { DonateModal } from "@/components/DonateModal";
 import { ClaimButton } from "@/components/ClaimButton";
 import { Calendar, Target, TrendingUp } from "lucide-react";
 import { formatDistanceToNow } from "date-fns";
+import { ShareButton } from "@/components/ShareButton";
 
 export function CampaignCard({ campaign }: { campaign: Campaign }) {
   const raised = Number(fromStroops(campaign.raised_amount));
@@ -65,6 +66,9 @@ export function CampaignCard({ campaign }: { campaign: Campaign }) {
           <DonateModal campaign={campaign} />
         )}
         <ClaimButton campaign={campaign} />
+        <div className="ml-auto">
+          <ShareButton campaign={campaign} />
+        </div>
       </CardFooter>
     </Card>
   );
