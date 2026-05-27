@@ -995,9 +995,12 @@
                   "string": "Bad Token Campaign"
                 },
                 {
+                  "string": "https://example.com/meta"
+                },
+                {
                   "i128": {
                     "hi": 0,
-                    "lo": 5000000
+                    "lo": 10000000
                   }
                 },
                 {
@@ -1005,7 +1008,8 @@
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
-                }
+                },
+                "void"
               ]
             }
           }
@@ -1171,9 +1175,12 @@
                       "string": "Bad Token Campaign"
                     },
                     {
+                      "string": "https://example.com/meta"
+                    },
+                    {
                       "i128": {
                         "hi": 0,
-                        "lo": 5000000
+                        "lo": 10000000
                       }
                     },
                     {
@@ -1181,7 +1188,8 @@
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
-                    }
+                    },
+                    "void"
                   ]
                 }
               ]
